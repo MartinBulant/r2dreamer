@@ -4,6 +4,7 @@ import json
 import os
 import random
 import time
+import wandb
 
 import numpy as np
 import torch
@@ -37,7 +38,9 @@ class Tee(io.TextIOBase):
 
     def isatty(self):
         # Preserve tty detection for progress bars etc.
-        return any(hasattr(stream, "isatty") and stream.isatty() for stream in self._streams)
+        return any(
+            hasattr(stream, "isatty") and stream.isatty() for stream in self._streams
+        )
 
 
 def setup_console_log(logdir, filename="console.log"):
@@ -116,7 +119,7 @@ class CudaBenchmark:
 
 
 class Logger:
-    def __init__(self, logdir, filename="metrics.jsonl"):
+    def __init__(self, logdir: str, config, filename: str = "metrics.jsonl"):
         self._logdir = logdir
         self._filename = filename
         self._writer = SummaryWriter(log_dir=str(logdir), max_queue=1000)
@@ -126,6 +129,13 @@ class Logger:
         self._images = {}
         self._videos = {}
         self._histograms = {}
+        self._config = config
+        self._use_wandb = self._config.wandb.use
+
+        if self._use_wandb:
+            wandb.init(
+                entity=config.wandb.entity, project=config.wandb.project, config=config
+            )
 
     def scalar(self, name, value):
         self._scalars[name] = float(value)
@@ -139,6 +149,22 @@ class Logger:
     def histogram(self, name, value):
         self._histograms[name] = np.array(value)
 
+    def log_wandb_scalar(self, name, value, step):
+        if self._use_wandb:
+            wandb.log({name: value}, step=step)
+
+    def log_wandb_image(self, name, image, step):
+        if self._use_wandb:
+            wandb.log({name: wandb.Image(image)}, step=step)
+
+    def log_wandb_video(self, name, frames, step, fps=16, format="mp4"):
+        if self._use_wandb:
+            wandb.log({name: wandb.Video(frames, fps=fps, format=format)}, step=step)
+
+    def log_wandb_histogram(self, name, sequence, step):
+        if self._use_wandb:
+            wandb.log({name: wandb.Histogram(sequence)}, step=step)
+
     def write(self, step, fps=False):
         scalars = list(self._scalars.items())
         if fps:
@@ -146,13 +172,21 @@ class Logger:
         print(f"[{step}]", " / ".join(f"{k} {v:.1f}" for k, v in scalars))
         with (self._logdir / self._filename).open("a") as f:
             f.write(json.dumps({"step": step, **dict(scalars)}) + "\n")
+
+        # scalars
         for name, value in scalars:
             if "/" not in name:
-                self._writer.add_scalar("scalars/" + name, value, step)
-            else:
-                self._writer.add_scalar(name, value, step)
+                name = "scalars/" + name
+
+            self._writer.add_scalar(name, value, step)
+            self.log_wandb_image(name, value, step)
+
+        # images
         for name, value in self._images.items():
             self._writer.add_image(name, value, step)
+            self.log_wandb_image(name, value, step)
+
+        # videos
         for name, value in self._videos.items():
             name = name if isinstance(name, str) else name.decode("utf-8")
             if np.issubdtype(value.dtype, np.floating):
@@ -160,8 +194,12 @@ class Logger:
             B, T, H, W, C = value.shape
             value = value.transpose(1, 4, 2, 0, 3).reshape((1, T, C, H, B * W))
             self._writer.add_video(name, value, step, 16)
+            self.log_wandb_video(name=name, frames=value, step=step)
+
+        # histograms
         for name, value in self._histograms.items():
             self._writer.add_histogram(name, value, step)
+            self.log_wandb_histogram(name, value, step)
 
         self._writer.flush()
         self._scalars = {}
@@ -179,7 +217,9 @@ class Logger:
         self._last_step = step
         return steps / duration
 
-    def log_hydra_config(self, config, name="config", step=0, log_hparams=False, hparams_run_name="."):
+    def log_hydra_config(
+        self, config, name="config", step=0, log_hparams=False, hparams_run_name="."
+    ):
         """
         Log a Hydra/OmegaConf config to TensorBoard:
           - as YAML text under "{name}/yaml"
@@ -295,7 +335,9 @@ def enable_deterministic_run():
     torch.use_deterministic_algorithms(True)
 
 
-def recursively_collect_optim_state_dict(obj, path="", optimizers_state_dicts=None, visited=None):
+def recursively_collect_optim_state_dict(
+    obj, path="", optimizers_state_dicts=None, visited=None
+):
     if optimizers_state_dicts is None:
         optimizers_state_dicts = {}
     if visited is None:
@@ -306,14 +348,18 @@ def recursively_collect_optim_state_dict(obj, path="", optimizers_state_dicts=No
     visited.add(id(obj))
     attrs = obj.__dict__
     if isinstance(obj, torch.nn.Module):
-        attrs.update({k: attr for k, attr in obj.named_modules() if "." not in k and obj != attr})
+        attrs.update(
+            {k: attr for k, attr in obj.named_modules() if "." not in k and obj != attr}
+        )
     for name, attr in attrs.items():
         new_path = path + "." + name if path else name
         if isinstance(attr, torch.optim.Optimizer):
             optimizers_state_dicts[new_path] = attr.state_dict()
         elif hasattr(attr, "__dict__"):
             optimizers_state_dicts.update(
-                recursively_collect_optim_state_dict(attr, new_path, optimizers_state_dicts, visited)
+                recursively_collect_optim_state_dict(
+                    attr, new_path, optimizers_state_dicts, visited
+                )
             )
     return optimizers_state_dicts
 
@@ -376,12 +422,14 @@ def print_module_tree(info: dict, parent_path: str = "", indent: int = 0):
     # Create a combined list of param_nodes (parameters) and child_nodes (submodules)
     param_nodes = []
     for param_name, count in info["params"].items():
-        param_nodes.append({
-            "name": param_name,
-            "params": {},
-            "children": {},
-            "total": count,
-        })
+        param_nodes.append(
+            {
+                "name": param_name,
+                "params": {},
+                "children": {},
+                "total": count,
+            }
+        )
 
     child_nodes = list(info["children"].values())
 
@@ -449,9 +497,7 @@ def print_param_stats(model):
 
     # Column width settings (adjust if necessary)
     col_widths = [60, 15, 15, 15, 15]
-    header_format = (
-        f"{{:<{col_widths[0]}}}{{:>{col_widths[1]}}}{{:>{col_widths[2]}}}{{:>{col_widths[3]}}}{{:>{col_widths[4]}}}"
-    )
+    header_format = f"{{:<{col_widths[0]}}}{{:>{col_widths[1]}}}{{:>{col_widths[2]}}}{{:>{col_widths[3]}}}{{:>{col_widths[4]}}}"
     row_format = header_format
 
     # Print the header

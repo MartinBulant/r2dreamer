@@ -1,4 +1,4 @@
-task: 'dmc_walker_walk'
+task: 'dmc_cheetah_run'
 steps: 1.01e6
 env_num: 16
 eval_episode_num: 10

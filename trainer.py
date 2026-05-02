@@ -18,7 +18,9 @@ class OnlineTrainer:
         self.batch_length = int(config.batch_length)
         batch_steps = int(config.batch_size * config.batch_length)
         # train_ratio is based on data steps rather than environment steps.
-        self._updates_needed = tools.Every(batch_steps / config.train_ratio * config.action_repeat)
+        self._updates_needed = tools.Every(
+            batch_steps / config.train_ratio * config.action_repeat
+        )
         self._should_pretrain = tools.Once()
         self._should_log = tools.Every(config.update_log_every)
         self._should_eval = tools.Every(self.eval_every)
@@ -135,7 +137,9 @@ class OnlineTrainer:
                         self.logger.scalar("episode/length", lengths[i])
                         self.logger.write(step + i)  # to show all values on tensorboard
                         returns[i] = lengths[i] = 0
-            step += int((~done).sum()) * self._action_repeat  # step is based on env side
+            step += (
+                int((~done).sum()) * self._action_repeat
+            )  # step is based on env side
             lengths += ~done
 
             # Step environments on CPU to avoid GPU<->CPU sync in the worker processes.
@@ -180,12 +184,18 @@ class OnlineTrainer:
                 # Log training metrics
                 if self._should_log(step):
                     for name, value in train_metrics.items():
-                        value = tools.to_np(value) if isinstance(value, torch.Tensor) else value
+                        value = (
+                            tools.to_np(value)
+                            if isinstance(value, torch.Tensor)
+                            else value
+                        )
                         self.logger.scalar(f"train/{name}", value)
                     self.logger.scalar("train/opt/updates", update_count)
                     if self.video_pred_log:
                         data, _, initial = self.replay_buffer.sample()
-                        self.logger.video("open_loop", tools.to_np(agent.video_pred(data, initial)))
+                        self.logger.video(
+                            "open_loop", tools.to_np(agent.video_pred(data, initial))
+                        )
                     if self.params_hist_log:
                         for name, param in agent._named_params.items():
                             self.logger.histogram(name, tools.to_np(param))

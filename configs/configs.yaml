@@ -10,6 +10,12 @@ seed: 0
 deterministic_run: False
 device: 'cuda:0'
 
+# wandb
+wandb:
+  use: True
+  entity: excavator-project
+  project: dm_control_R2_dreamer
+
 hydra:
   run:
     dir: ${logdir}
